@@ -15,7 +15,10 @@ const (
 	failed
 )
 
-const defaultAddr = "localhost:6060" // default webserver address
+const (
+	defaultAddr  = "localhost:6060" // default webserver address
+	defaultProxy = ""
+)
 
 func main() {
 	os.Exit(Run())
@@ -54,7 +57,7 @@ func Run() int {
 
 func getArgs() (addr, proxy string) {
 	httpAddr := flag.String("http", defaultAddr, "bastion service address")
-	proxyAddr := flag.String("proxy", "", "proxy url")
+	proxyAddr := flag.String("proxy", defaultProxy, "proxy url")
 	flag.Parse()
 
 	return *httpAddr, *proxyAddr

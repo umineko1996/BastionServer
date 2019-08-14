@@ -1,14 +1,17 @@
 package bastionserver
 
 import (
-	"bytes"
+	"bufio"
+	"encoding/base64"
 	"errors"
 	"io"
-	"io/ioutil"
 	"log"
+	"net"
 	"net/http"
 	"net/url"
 	"os"
+	"strings"
+	"sync"
 )
 
 type BastionServer struct {
@@ -23,18 +26,22 @@ func New() *BastionServer {
 		transport: http.DefaultTransport,
 	}
 }
+
 func (bs *BastionServer) WithTransport(transport http.RoundTripper) *BastionServer {
 	bs.transport = transport
 	return bs
 }
+
 func (bs *BastionServer) WithProxy(proxyURL *url.URL) *BastionServer {
 	bs.proxy = proxyURL
 	return bs
 }
+
 func (bs *BastionServer) WithLogger(logger *log.Logger) *BastionServer {
 	bs.l = logger
 	return bs
 }
+
 func (bs *BastionServer) setProxy(bastionURL *url.URL) error {
 	if bs.proxy != nil {
 		http.DefaultTransport.(*http.Transport).Proxy = http.ProxyURL(bs.proxy)
@@ -65,9 +72,10 @@ func (bs *BastionServer) setProxy(bastionURL *url.URL) error {
 	bs.proxy = proxyURL
 	return nil
 }
+
 func (bs *BastionServer) Listen(addr string) error {
 	if bs.l == nil {
-		bs.l = log.New(os.Stderr, "", log.Ldate)
+		bs.l = log.New(os.Stderr, "", log.LstdFlags)
 	}
 	bastionURL, err := url.Parse("http://" + addr)
 	if err != nil {
@@ -81,10 +89,12 @@ func (bs *BastionServer) Listen(addr string) error {
 		return err
 	}
 	bs.l.Printf("bastion server listen = %s\n", bs.addr.Host)
+
 	return http.ListenAndServe(bastionURL.Host, bs)
 }
+
 func (bs *BastionServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	bs.l.Printf("req: %#v", r)
+	bs.l.Printf("req: %s", r.URL)
 	if r.Method == http.MethodConnect {
 		bs.connHTTPSTunnel(w, r)
 	} else {
@@ -93,6 +103,104 @@ func (bs *BastionServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 }
 
 func (bs *BastionServer) connHTTPSTunnel(w http.ResponseWriter, r *http.Request) {
+	dstAddr := r.Host
+	if bs.proxy != nil {
+		bs.l.Printf("connection proxy")
+		dstAddr = bs.proxy.Host
+	}
+
+	dst, err := net.Dial("tcp", dstAddr)
+	if err != nil {
+		bs.l.Println(err)
+		http.Error(w, "bastion server error: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	if bs.proxy != nil {
+		if err := bs.sendConnectMethodRequest(dst, r.Host); err != nil {
+			bs.l.Println(err)
+			http.Error(w, "bastion server error: "+err.Error(), http.StatusInternalServerError)
+			return
+		}
+	}
+
+	hij, ok := w.(http.Hijacker)
+	if !ok {
+		dst.Close()
+		bs.l.Panic("httpserver does not support hijacking")
+	}
+	src, _, err := hij.Hijack()
+	if err != nil {
+		dst.Close()
+		bs.l.Panic("Cannot hijack connection " + err.Error())
+	}
+	src.Write([]byte("HTTP/1.0 200 OK\r\n\r\n"))
+
+	go bs.duplexCommunication(src, dst)
+}
+
+func (bs *BastionServer) duplexCommunication(conn1, conn2 net.Conn) {
+	defer conn1.Close()
+	defer conn2.Close()
+	wg := new(sync.WaitGroup)
+	wg.Add(2)
+	go func() {
+		defer wg.Done()
+		if _, err := io.Copy(conn1, conn2); err != nil {
+			bs.l.Println(err)
+		}
+	}()
+	go func() {
+		defer wg.Done()
+		if _, err := io.Copy(conn2, conn1); err != nil {
+			bs.l.Println(err)
+		}
+	}()
+	wg.Wait()
+}
+
+func (bs *BastionServer) sendConnectMethodRequest(proxy net.Conn, targetAddr string) error {
+	connectReq := &http.Request{
+		Method: http.MethodConnect,
+		URL:    &url.URL{Opaque: targetAddr},
+		Host:   targetAddr,
+		Header: make(http.Header),
+	}
+	if pa := bs.proxyAuth(); pa != "" {
+		connectReq.Header.Set("Proxy-Authorization", pa)
+	}
+	connectReq.Write(proxy)
+	br := bufio.NewReader(proxy)
+	resp, err := http.ReadResponse(br, connectReq)
+	if err != nil {
+		return err
+	}
+	if resp.StatusCode != 200 {
+		f := strings.SplitN(resp.Status, " ", 2)
+		if len(f) < 2 {
+			return errors.New("unknown status code")
+		}
+		return errors.New(f[1])
+	}
+	bs.l.Printf("connection proxy = %s", bs.proxy.Host)
+	return nil
+}
+
+func (bs *BastionServer) proxyAuth() string {
+	if bs.proxy == nil {
+		return ""
+	}
+	if u := bs.proxy.User; u != nil {
+		username := u.Username()
+		password, _ := u.Password()
+		return "Basic " + basicAuth(username, password)
+	}
+	return ""
+}
+
+func basicAuth(username, password string) string {
+	auth := username + ":" + password
+	return base64.StdEncoding.EncodeToString([]byte(auth))
 }
 
 func (bs *BastionServer) sendHTTPRequest(w http.ResponseWriter, r *http.Request) {
@@ -100,7 +208,6 @@ func (bs *BastionServer) sendHTTPRequest(w http.ResponseWriter, r *http.Request)
 	if transport == nil {
 		transport = http.DefaultTransport
 	}
-
 	r.RequestURI = ""
 	r.Header.Del("Accept-Encoding")
 	r.Header.Del("Proxy-Connection")
@@ -110,16 +217,10 @@ func (bs *BastionServer) sendHTTPRequest(w http.ResponseWriter, r *http.Request)
 	resp, err := transport.RoundTrip(r)
 	if err != nil {
 		bs.l.Println(err)
-		code := http.StatusInternalServerError
-		buf := bytes.NewBufferString("bastion server error: " + err.Error())
-		resp = &http.Response{
-			Status:     http.StatusText(code),
-			StatusCode: code,
-			Body:       ioutil.NopCloser(buf),
-		}
+		http.Error(w, "bastion server error: "+err.Error(), http.StatusInternalServerError)
 	}
 	bs.l.Printf("resp: %s", resp.Status)
-	for key, _ := range resp.Header {
+	for key := range resp.Header {
 		v := resp.Header.Get(key)
 		w.Header().Set(key, v)
 	}
