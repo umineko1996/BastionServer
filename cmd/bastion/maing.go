@@ -32,7 +32,7 @@ func Run() int {
 		}
 	}()
 
-	addr, proxy := getArgs()
+	addr, proxy, tls := getArgs()
 
 	server := bastionserver.New()
 
@@ -48,17 +48,40 @@ func Run() int {
 		server = server.WithProxy(pu)
 	}
 
-	if pErr = server.Listen(addr); pErr != nil {
-		return failed
+	switch {
+	case tls != nil:
+		if pErr = server.ListenTLS(addr, tls.certFile, tls.keyFile); pErr != nil {
+			return failed
+		}
+	default:
+		if pErr = server.Listen(addr); pErr != nil {
+			return failed
+		}
 	}
 
 	return success
 }
 
-func getArgs() (addr, proxy string) {
+type tlsConfig struct {
+	certFile string
+	keyFile  string
+}
+
+func getArgs() (addr, proxy string, tls *tlsConfig) {
 	httpAddr := flag.String("http", defaultAddr, "bastion service address")
 	proxyAddr := flag.String("proxy", defaultProxy, "proxy url")
+	httpsAddr := flag.String("https", "", "bastion service use ssl/tls")
+	certFile := flag.String("cert", "", "ssl/tls cert file")
+	keyFile := flag.String("key", "", "ssl/tls key file")
 	flag.Parse()
 
-	return *httpAddr, *proxyAddr
+	if *httpsAddr != "" {
+		tls = &tlsConfig{
+			certFile: *certFile,
+			keyFile:  *keyFile,
+		}
+		return *httpsAddr, *proxyAddr, tls
+	}
+
+	return *httpAddr, *proxyAddr, nil
 }

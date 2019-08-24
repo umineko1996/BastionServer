@@ -42,6 +42,25 @@ func (bs *BastionServer) WithLogger(logger *log.Logger) *BastionServer {
 	return bs
 }
 
+func (bs *BastionServer) init(addr string) error {
+	if bs.l == nil {
+		bs.l = log.New(os.Stderr, "", log.LstdFlags)
+	}
+	bastionURL, err := url.Parse("http://" + addr)
+	if err != nil {
+		return err
+	}
+	if bastionURL.Hostname() == "" {
+		bastionURL.Host = "localhost:" + bastionURL.Port()
+	}
+	bs.addr = bastionURL
+	if err := bs.setProxy(bastionURL); err != nil {
+		return err
+	}
+	bs.l.Printf("bastion server listen = %s\n", bs.addr.Host)
+	return nil
+}
+
 func (bs *BastionServer) setProxy(bastionURL *url.URL) error {
 	if bs.proxy != nil {
 		http.DefaultTransport.(*http.Transport).Proxy = http.ProxyURL(bs.proxy)
@@ -74,23 +93,8 @@ func (bs *BastionServer) setProxy(bastionURL *url.URL) error {
 }
 
 func (bs *BastionServer) Listen(addr string) error {
-	if bs.l == nil {
-		bs.l = log.New(os.Stderr, "", log.LstdFlags)
-	}
-	bastionURL, err := url.Parse("http://" + addr)
-	if err != nil {
-		return err
-	}
-	if bastionURL.Hostname() == "" {
-		bastionURL.Host = "localhost:" + bastionURL.Port()
-	}
-	bs.addr = bastionURL
-	if err := bs.setProxy(bastionURL); err != nil {
-		return err
-	}
-	bs.l.Printf("bastion server listen = %s\n", bs.addr.Host)
-
-	return http.ListenAndServe(bastionURL.Host, bs)
+	bs.init(addr)
+	return http.ListenAndServe(bs.addr.Host, bs)
 }
 
 func (bs *BastionServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -228,6 +232,18 @@ func (bs *BastionServer) sendHTTPRequest(w http.ResponseWriter, r *http.Request)
 	if _, err := io.Copy(w, resp.Body); err != nil {
 		bs.l.Println(err)
 	}
+}
+
+func (bs *BastionServer) ListenTLS(addr, certFile, keyFile string) error {
+	if certFile == "" {
+		return errors.New("cert file no such specified")
+	}
+	if keyFile == "" {
+		return errors.New("key file no such specified")
+	}
+	bs.init(addr)
+
+	return http.ListenAndServeTLS(bs.addr.Host, certFile, keyFile, bs)
 }
 
 // Listen はデフォルト設定のbastionserverを起動します
