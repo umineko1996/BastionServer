@@ -46,7 +46,7 @@ func (bs *BastionServer) init(addr string) error {
 	if bs.l == nil {
 		bs.l = log.New(os.Stderr, "", log.LstdFlags)
 	}
-	bastionURL, err := url.Parse("http://" + addr)
+	bastionURL, err := url.Parse(addr)
 	if err != nil {
 		return err
 	}
@@ -54,14 +54,14 @@ func (bs *BastionServer) init(addr string) error {
 		bastionURL.Host = "localhost:" + bastionURL.Port()
 	}
 	bs.addr = bastionURL
-	if err := bs.setProxy(bastionURL); err != nil {
+	if err := bs.setProxy(); err != nil {
 		return err
 	}
 	bs.l.Printf("bastion server listen = %s\n", bs.addr.Host)
 	return nil
 }
 
-func (bs *BastionServer) setProxy(bastionURL *url.URL) error {
+func (bs *BastionServer) setProxy() error {
 	if bs.proxy != nil {
 		http.DefaultTransport.(*http.Transport).Proxy = http.ProxyURL(bs.proxy)
 	}
@@ -81,11 +81,11 @@ func (bs *BastionServer) setProxy(bastionURL *url.URL) error {
 		return nil
 	}
 	bs.l.Printf("use proxy = %s\n", proxyURL)
-	if proxyURL.Host == bastionURL.Host {
+	if proxyURL.Host == bs.addr.Host {
 		return errors.New("bastion address unexpected same proxy addr")
 	}
 	// MEMO 基本はローカルホスト指定のはずだが、IP指定とホスト名指定で一致しないかもしれないので一応チェック
-	if (proxyURL.Hostname() == "localhost" || proxyURL.Hostname() == "127.0.0.1") && proxyURL.Port() == bastionURL.Port() {
+	if (proxyURL.Hostname() == "localhost" || proxyURL.Hostname() == "127.0.0.1") && proxyURL.Port() == bs.addr.Port() {
 		return errors.New("bastion address unexpected same proxy addr")
 	}
 	bs.proxy = proxyURL
@@ -93,13 +93,16 @@ func (bs *BastionServer) setProxy(bastionURL *url.URL) error {
 }
 
 func (bs *BastionServer) Listen(addr string) error {
-	bs.init(addr)
+	if err := bs.init("http://" + addr); err != nil {
+		return err
+	}
 	return http.ListenAndServe(bs.addr.Host, bs)
 }
 
 func (bs *BastionServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	bs.l.Printf("req: %s", r.URL)
 	if r.Method == http.MethodConnect {
+		bs.l.Printf("request is CONNECT method")
 		bs.connHTTPSTunnel(w, r)
 	} else {
 		bs.sendHTTPRequest(w, r)
@@ -241,7 +244,9 @@ func (bs *BastionServer) ListenTLS(addr, certFile, keyFile string) error {
 	if keyFile == "" {
 		return errors.New("key file no such specified")
 	}
-	bs.init(addr)
+	if err := bs.init("https://" + addr); err != nil {
+		return err
+	}
 
 	return http.ListenAndServeTLS(bs.addr.Host, certFile, keyFile, bs)
 }
