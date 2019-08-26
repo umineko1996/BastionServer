@@ -2,6 +2,7 @@ package bastionserver
 
 import (
 	"bufio"
+	"crypto/tls"
 	"encoding/base64"
 	"errors"
 	"io"
@@ -19,6 +20,7 @@ type BastionServer struct {
 	addr      *url.URL
 	proxy     *url.URL
 	l         *log.Logger
+	tlsConfig *tls.Config
 }
 
 func New() *BastionServer {
@@ -39,6 +41,32 @@ func (bs *BastionServer) WithProxy(proxyURL *url.URL) *BastionServer {
 
 func (bs *BastionServer) WithLogger(logger *log.Logger) *BastionServer {
 	bs.l = logger
+	return bs
+}
+
+func (bs *BastionServer) WithTLS(certFile, keyFile string) *BastionServer {
+	if bs.l == nil {
+		bs.l = log.New(os.Stderr, "", log.LstdFlags)
+	}
+	if certFile == "" {
+		bs.l.Println("cert file no such specified")
+		return bs
+	}
+	if keyFile == "" {
+		bs.l.Println("key file no such specified")
+		return bs
+	}
+
+	certificate, err := tls.LoadX509KeyPair(certFile, keyFile)
+	if err != nil {
+		bs.l.Println("key file no such specified")
+		return bs
+	}
+
+	config := &tls.Config{}
+	config.Certificates = make([]tls.Certificate, 1)
+	config.Certificates[0] = certificate
+	bs.tlsConfig = config
 	return bs
 }
 
@@ -143,7 +171,32 @@ func (bs *BastionServer) connHTTPSTunnel(w http.ResponseWriter, r *http.Request)
 	}
 	src.Write([]byte("HTTP/1.0 200 OK\r\n\r\n"))
 
+	if bs.tlsConfig != nil {
+		bs.l.Println("decryption proxy")
+		src, dst = bs.decryptionHTTPS(src, dst, r.URL.Hostname())
+	}
+
 	go bs.duplexCommunication(src, dst)
+}
+
+func (bs *BastionServer) decryptionHTTPS(src, dst net.Conn, targetServerName string) (tlsSrc, tlsDst net.Conn) {
+	// TODO bs.tlsConfigに指定されたルート認証局情報を使用し、ターゲットドメインの証明書を作成する必要がある
+	srcConfig := cloneTLSConfig(bs.tlsConfig)
+	tlsSrc = tls.Server(src, srcConfig)
+	dstConfig := &tls.Config{
+		ServerName:             targetServerName,
+		SessionTicketsDisabled: true,
+	}
+	tlsDst = tls.Client(dst, dstConfig)
+	return tlsSrc, tlsDst
+}
+
+func cloneTLSConfig(config *tls.Config) *tls.Config {
+	newConfig := new(tls.Config)
+	newConfig.Certificates = make([]tls.Certificate, 1)
+	newConfig.Certificates[0] = config.Certificates[0]
+
+	return newConfig
 }
 
 func (bs *BastionServer) duplexCommunication(conn1, conn2 net.Conn) {
@@ -238,6 +291,7 @@ func (bs *BastionServer) sendHTTPRequest(w http.ResponseWriter, r *http.Request)
 }
 
 func (bs *BastionServer) ListenTLS(addr, certFile, keyFile string) error {
+	bs.l.Println("bastion server listen ssl/tls (https)")
 	if certFile == "" {
 		return errors.New("cert file no such specified")
 	}
