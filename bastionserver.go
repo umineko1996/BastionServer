@@ -2,17 +2,22 @@ package bastionserver
 
 import (
 	"bufio"
+	"crypto/rand"
 	"crypto/tls"
+	"crypto/x509"
+	"crypto/x509/pkix"
 	"encoding/base64"
 	"errors"
 	"io"
 	"log"
+	"math/big"
 	"net"
 	"net/http"
 	"net/url"
 	"os"
 	"strings"
 	"sync"
+	"time"
 )
 
 type BastionServer struct {
@@ -20,7 +25,7 @@ type BastionServer struct {
 	addr      *url.URL
 	proxy     *url.URL
 	l         *log.Logger
-	tlsConfig *tls.Config
+	cert      *tls.Certificate
 }
 
 func New() *BastionServer {
@@ -44,7 +49,7 @@ func (bs *BastionServer) WithLogger(logger *log.Logger) *BastionServer {
 	return bs
 }
 
-func (bs *BastionServer) WithTLS(certFile, keyFile string) *BastionServer {
+func (bs *BastionServer) WithTLSDecryption(certFile, keyFile string) *BastionServer {
 	if bs.l == nil {
 		bs.l = log.New(os.Stderr, "", log.LstdFlags)
 	}
@@ -59,14 +64,17 @@ func (bs *BastionServer) WithTLS(certFile, keyFile string) *BastionServer {
 
 	certificate, err := tls.LoadX509KeyPair(certFile, keyFile)
 	if err != nil {
-		bs.l.Println("key file no such specified")
+		bs.l.Println(err)
 		return bs
 	}
 
-	config := &tls.Config{}
-	config.Certificates = make([]tls.Certificate, 1)
-	config.Certificates[0] = certificate
-	bs.tlsConfig = config
+	certificate.Leaf, err = x509.ParseCertificate(certificate.Certificate[0])
+	if err != nil {
+		bs.l.Println(err)
+		return bs
+	}
+	bs.cert = &certificate
+
 	return bs
 }
 
@@ -171,7 +179,7 @@ func (bs *BastionServer) connHTTPSTunnel(w http.ResponseWriter, r *http.Request)
 	}
 	src.Write([]byte("HTTP/1.0 200 OK\r\n\r\n"))
 
-	if bs.tlsConfig != nil {
+	if bs.cert != nil {
 		bs.l.Println("decryption proxy")
 		src, dst = bs.decryptionHTTPS(src, dst, r.URL.Hostname())
 	}
@@ -181,7 +189,15 @@ func (bs *BastionServer) connHTTPSTunnel(w http.ResponseWriter, r *http.Request)
 
 func (bs *BastionServer) decryptionHTTPS(src, dst net.Conn, targetServerName string) (tlsSrc, tlsDst net.Conn) {
 	// TODO bs.tlsConfigに指定されたルート認証局情報を使用し、ターゲットドメインの証明書を作成する必要がある
-	srcConfig := cloneTLSConfig(bs.tlsConfig)
+	// https://golang.org/src/crypto/tls/generate_cert.go
+	cert, err := bs.createCert(targetServerName)
+	if err != nil {
+		bs.l.Panic(err)
+	}
+	srcConfig := &tls.Config{
+		Certificates: []tls.Certificate{*cert},
+	}
+
 	tlsSrc = tls.Server(src, srcConfig)
 	dstConfig := &tls.Config{
 		ServerName:             targetServerName,
@@ -191,12 +207,32 @@ func (bs *BastionServer) decryptionHTTPS(src, dst net.Conn, targetServerName str
 	return tlsSrc, tlsDst
 }
 
-func cloneTLSConfig(config *tls.Config) *tls.Config {
-	newConfig := new(tls.Config)
-	newConfig.Certificates = make([]tls.Certificate, 1)
-	newConfig.Certificates[0] = config.Certificates[0]
+func (bs *BastionServer) createCert(host string) (*tls.Certificate, error) {
 
-	return newConfig
+	template := x509.Certificate{
+		IsCA:                  false,
+		SerialNumber:          big.NewInt(23),
+		Subject:               pkix.Name{},
+		NotBefore:             time.Now(),
+		NotAfter:              time.Now().Add(24 * time.Hour),
+		Issuer:                bs.cert.Leaf.Subject,
+		KeyUsage:              x509.KeyUsageDigitalSignature | x509.KeyUsageKeyEncipherment | x509.KeyUsageCertSign,
+		ExtKeyUsage:           []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
+		BasicConstraintsValid: true,
+		DNSNames:              []string{host},
+	}
+
+	derBytes, err := x509.CreateCertificate(rand.Reader, &template, bs.cert.Leaf, bs.cert.Leaf.PublicKey, bs.cert.PrivateKey)
+	if err != nil {
+		return nil, err
+	}
+
+	cert := &tls.Certificate{
+		Certificate: [][]byte{derBytes, bs.cert.Leaf.Raw},
+		PrivateKey:  bs.cert.PrivateKey,
+	}
+
+	return cert, nil
 }
 
 func (bs *BastionServer) duplexCommunication(conn1, conn2 net.Conn) {

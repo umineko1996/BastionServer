@@ -47,12 +47,12 @@ func Run() int {
 		}
 		server = server.WithProxy(pu)
 	}
-	if tls.decrypt {
-		server = server.WithTLS(tls.certFile, tls.keyFile)
+	if tls != nil && tls.decrypt {
+		server = server.WithTLSDecryption(tls.certFile, tls.keyFile)
 	}
 
 	switch {
-	case tls.https:
+	case tls != nil && tls.https:
 		if pErr = server.ListenTLS(addr, tls.certFile, tls.keyFile); pErr != nil {
 			return failed
 		}
@@ -78,7 +78,7 @@ func getArgs() (addr, proxy string, tls *tlsConfig) {
 	httpsAddr := flag.String("https", "", "bastion service use ssl/tls")
 	certFile := flag.String("cert", "", "ssl/tls cert file")
 	keyFile := flag.String("key", "", "ssl/tls key file")
-	decrypt := flag.Bool("dave", false, "ssl decryption proxy")
+	decrypt := flag.Bool("dave", false, "ssl/tls decryption proxy")
 	flag.Parse()
 
 	switch {
