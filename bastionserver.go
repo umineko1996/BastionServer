@@ -2,6 +2,7 @@ package bastionserver
 
 import (
 	"bufio"
+	"bytes"
 	"crypto/rand"
 	"crypto/tls"
 	"crypto/x509"
@@ -13,6 +14,7 @@ import (
 	"math/big"
 	"net"
 	"net/http"
+	"net/http/httputil"
 	"net/url"
 	"os"
 	"strings"
@@ -136,7 +138,7 @@ func (bs *BastionServer) Listen(addr string) error {
 }
 
 func (bs *BastionServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	bs.l.Printf("req: %s", r.URL)
+	bs.l.Printf("req: %s\n", r.URL)
 	if r.Method == http.MethodConnect {
 		bs.l.Printf("request is CONNECT method")
 		bs.connHTTPSTunnel(w, r)
@@ -148,7 +150,7 @@ func (bs *BastionServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 func (bs *BastionServer) connHTTPSTunnel(w http.ResponseWriter, r *http.Request) {
 	dstAddr := r.Host
 	if bs.proxy != nil {
-		bs.l.Printf("connection proxy")
+		bs.l.Println("connection proxy")
 		dstAddr = bs.proxy.Host
 	}
 
@@ -187,6 +189,74 @@ func (bs *BastionServer) connHTTPSTunnel(w http.ResponseWriter, r *http.Request)
 	go bs.duplexCommunication(src, dst)
 }
 
+type dumpConn struct {
+	base net.Conn
+	l    *log.Logger
+}
+
+func (dc *dumpConn) Close() error {
+	return dc.base.Close()
+}
+func (dc *dumpConn) LocalAddr() net.Addr {
+	return dc.base.LocalAddr()
+}
+func (dc *dumpConn) RemoteAddr() net.Addr {
+	return dc.base.RemoteAddr()
+}
+func (dc *dumpConn) SetDeadline(t time.Time) error {
+	return dc.base.SetDeadline(t)
+}
+func (dc *dumpConn) SetReadDeadline(t time.Time) error {
+	return dc.base.SetReadDeadline(t)
+}
+func (dc *dumpConn) SetWriteDeadline(t time.Time) error {
+	return dc.base.SetWriteDeadline(t)
+}
+
+func (dc *dumpConn) Read(b []byte) (n int, err error) {
+	n, err = dc.base.Read(b)
+	if err != nil {
+		return n, err
+	}
+	dc.dumpRequest(b)
+
+	return n, err
+}
+func (dc *dumpConn) Write(b []byte) (n int, err error) {
+	dc.dumpResponse(b)
+	return dc.base.Write(b)
+}
+
+func (dc *dumpConn) dumpRequest(b []byte) {
+	req, err := http.ReadRequest(bufio.NewReader(bytes.NewReader(b)))
+	if err != nil {
+		//dc.l.Printf("read request failed: %s\n", err)
+		return
+	}
+	dump, err := httputil.DumpRequest(req, false)
+	if err != nil {
+		//dc.l.Printf("dump request failed: %s\n", err)
+		return
+	}
+	dc.l.Println("REQUEST DUMP")
+	dc.l.Writer().Write(dump)
+}
+
+func (dc *dumpConn) dumpResponse(b []byte) {
+	resp, err := http.ReadResponse(bufio.NewReader(bytes.NewReader(b)), nil)
+	if err != nil {
+		//dc.l.Printf("read resuponse failed: %s\n", err)
+		return
+	}
+	dump, err := httputil.DumpResponse(resp, false)
+	if err != nil {
+		//dc.l.Printf("dump resuponse failed: %s\n", err)
+		return
+	}
+	dc.l.Println("RESPONSE DUMP")
+	dc.l.Writer().Write(dump)
+}
+
 func (bs *BastionServer) decryptionHTTPS(src, dst net.Conn, targetServerName string) (tlsSrc, tlsDst net.Conn) {
 	// TODO bs.tlsConfigに指定されたルート認証局情報を使用し、ターゲットドメインの証明書を作成する必要がある
 	// https://golang.org/src/crypto/tls/generate_cert.go
@@ -204,7 +274,7 @@ func (bs *BastionServer) decryptionHTTPS(src, dst net.Conn, targetServerName str
 		SessionTicketsDisabled: true,
 	}
 	tlsDst = tls.Client(dst, dstConfig)
-	return tlsSrc, tlsDst
+	return &dumpConn{base: tlsSrc, l: bs.l}, tlsDst
 }
 
 func (bs *BastionServer) createCert(host string) (*tls.Certificate, error) {
@@ -278,7 +348,7 @@ func (bs *BastionServer) sendConnectMethodRequest(proxy net.Conn, targetAddr str
 		}
 		return errors.New(f[1])
 	}
-	bs.l.Printf("connection proxy = %s", bs.proxy.Host)
+	bs.l.Printf("connection proxy = %s\n", bs.proxy.Host)
 	return nil
 }
 
@@ -315,7 +385,7 @@ func (bs *BastionServer) sendHTTPRequest(w http.ResponseWriter, r *http.Request)
 		bs.l.Println(err)
 		http.Error(w, "bastion server error: "+err.Error(), http.StatusInternalServerError)
 	}
-	bs.l.Printf("resp: %s", resp.Status)
+	bs.l.Printf("resp: %s\n", resp.Status)
 	for key := range resp.Header {
 		v := resp.Header.Get(key)
 		w.Header().Set(key, v)
