@@ -36,7 +36,11 @@ func Run() int {
 
 	server := bastionserver.New()
 
-	if proxy != "" {
+	switch proxy {
+	case "":
+	case "non_proxy", "NON_PROXY":
+		server = server.WithNonProxy()
+	default:
 		if !strings.HasPrefix(proxy, "http") {
 			proxy = "http://" + proxy
 		}
@@ -47,6 +51,7 @@ func Run() int {
 		}
 		server = server.WithProxy(pu)
 	}
+
 	if tls != nil && tls.decrypt {
 		server = server.WithTLSDecryption(tls.certFile, tls.keyFile)
 	}
