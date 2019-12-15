@@ -128,7 +128,7 @@ func basicAuth(username, password string) string {
 }
 
 func (bs *BastionServer) decryptionHTTPS(src, dst net.Conn, targetServerName string) (tlsSrc, tlsDst net.Conn) {
-	// TODO bs.tlsConfigに指定されたルート認証局情報を使用し、ターゲットドメインの証明書を作成する必要がある
+	// bs.tlsConfigに指定されたルート認証局情報を使用し、ターゲットドメインの証明書を作成する
 	// https://golang.org/src/crypto/tls/generate_cert.go
 	cert, err := bs.createCert(targetServerName)
 	if err != nil {
@@ -142,6 +142,7 @@ func (bs *BastionServer) decryptionHTTPS(src, dst net.Conn, targetServerName str
 	dstConfig := &tls.Config{
 		ServerName:             targetServerName,
 		SessionTicketsDisabled: true,
+		// InsecureSkipVerify: true,
 	}
 	tlsDst = tls.Client(dst, dstConfig)
 
@@ -154,7 +155,6 @@ func (bs *BastionServer) decryptionHTTPS(src, dst net.Conn, targetServerName str
 }
 
 func (bs *BastionServer) createCert(host string) (*tls.Certificate, error) {
-
 	template := x509.Certificate{
 		IsCA:                  false,
 		SerialNumber:          big.NewInt(23),

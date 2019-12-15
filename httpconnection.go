@@ -16,11 +16,14 @@ func (bs *BastionServer) sendHTTPRequest(w http.ResponseWriter, r *http.Request)
 	r.Header.Del("Proxy-Authenticate")
 	r.Header.Del("Proxy-Authorization")
 	r.Header.Del("Connection")
+
 	resp, err := transport.RoundTrip(r)
 	if err != nil {
 		bs.l.Println(err)
 		http.Error(w, "bastion server error: "+err.Error(), http.StatusInternalServerError)
+		return
 	}
+	defer resp.Body.Close()
 	bs.l.Printf("resp: %s\n", resp.Status)
 	for key := range resp.Header {
 		v := resp.Header.Get(key)
